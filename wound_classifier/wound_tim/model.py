@@ -25,10 +25,26 @@ def _strip_classifier(net: nn.Module) -> tuple[nn.Module, int]:
 
 
 class WoundTIMNet(nn.Module):
-    def __init__(self, head_sizes: dict[str, int], backbone: str = "resnet50", pretrained: bool = True, dropout: float = 0.3):
+    def __init__(
+        self,
+        head_sizes: dict[str, int],
+        backbone: str = "resnet50",
+        pretrained: bool = True,
+        dropout: float = 0.3,
+        weights_path: str | None = None,
+    ):
         super().__init__()
         ctor, weights = _BACKBONES[backbone]
-        self.backbone, dim = _strip_classifier(ctor(weights=weights if pretrained else None))
+        net = ctor(weights=weights if pretrained and not weights_path else None)
+        if weights_path:
+            # A local ImageNet checkpoint, e.g. when download.pytorch.org is unreachable.
+            # timm ResNet checkpoints use the same parameter names as torchvision.
+            state = torch.load(weights_path, map_location="cpu")
+            state = state.get("state_dict", state.get("model", state))
+            missing, unexpected = net.load_state_dict(state, strict=False)
+            if [k for k in missing if not k.startswith(("fc.", "classifier."))]:
+                raise ValueError(f"{weights_path} does not match {backbone}: missing {missing[:5]}")
+        self.backbone, dim = _strip_classifier(net)
         self.dropout = nn.Dropout(dropout)
         self.heads = nn.ModuleDict({name: nn.Linear(dim, n) for name, n in head_sizes.items()})
 

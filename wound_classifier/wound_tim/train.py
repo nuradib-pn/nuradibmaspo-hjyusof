@@ -18,7 +18,7 @@ from sklearn.metrics import accuracy_score, balanced_accuracy_score, classificat
 from torch import nn
 from torch.utils.data import DataLoader
 
-from .data import HEAD_NAMES, IGNORE, WoundDataset, build_index, make_transforms, split_index
+from .data import HEAD_NAMES, IGNORE, WoundDataset, build_index, make_transforms, split_index, type_from_tim, type_number
 from .model import WoundTIMNet
 
 
@@ -58,6 +58,21 @@ def predict(model, loader, device):
     return {k: np.concatenate(v) for k, v in preds.items()}, {k: np.concatenate(v) for k, v in trues.items()}
 
 
+def add_type_from_tim(preds, trues, vocabs):
+    """Rebuild the wound type from the T / I / M predictions (type = T + I + M) so it can be
+    compared with the direct 8-way head. Needs binary heads and TYPE n folder names."""
+    if not all(h in preds for h in HEAD_NAMES) or any(len(vocabs[h]) != 2 for h in HEAD_NAMES):
+        return
+    nums = [type_number(c) for c in vocabs["wound_type"]]
+    if None in nums:
+        return
+    index_of = {n: i for i, n in enumerate(nums)}
+    rebuilt = [type_from_tim(t, i, m) for t, i, m in zip(*(preds[h] for h in HEAD_NAMES))]
+    preds["wound_type_from_tim"] = np.array([index_of.get(n, -1) for n in rebuilt])
+    trues["wound_type_from_tim"] = trues["wound_type"]
+    vocabs["wound_type_from_tim"] = vocabs["wound_type"]
+
+
 def score(preds, trues, vocabs) -> dict:
     report = {}
     for name in preds:
@@ -85,6 +100,8 @@ def main(argv=None):
     ap.add_argument("--epochs", type=int)
     ap.add_argument("--out-dir")
     ap.add_argument("--no-pretrained", action="store_true", help="random init (offline smoke tests)")
+    ap.add_argument("--backbone")
+    ap.add_argument("--weights-path", help="local ImageNet checkpoint for the backbone")
     args = ap.parse_args(argv)
 
     cfg = yaml.safe_load(Path(args.config).read_text())
@@ -98,6 +115,10 @@ def main(argv=None):
         tcfg["out_dir"] = args.out_dir
     if args.no_pretrained:
         cfg["model"]["pretrained"] = False
+    if args.backbone:
+        cfg["model"]["backbone"] = args.backbone
+    if args.weights_path:
+        cfg["model"]["weights_path"] = args.weights_path
 
     seed_everything(cfg["seed"])
     device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
@@ -107,12 +128,15 @@ def main(argv=None):
     df, vocabs = build_index(cfg)
     df = split_index(df, cfg["val_fraction"], cfg["test_fraction"], cfg["seed"])
     df.drop(columns=["path"]).to_csv(out / "splits.csv", index=False)
+    dedup = df.attrs.get("dedup_report", {})
     train_df = df[df.split == "train"]
 
     # Only keep T / I / M heads that have at least one labelled training image.
     active = ["wound_type"] + [h for h in HEAD_NAMES if (train_df[f"{h}_y"] != IGNORE).any()]
     skipped = [h for h in HEAD_NAMES if h not in active]
-    print(f"device={device}  images={len(df)}  split={df.split.value_counts().to_dict()}")
+    print(f"device={device}  images={len(df)}  split={df.split.value_counts().to_dict()}  groups={df.patient_id.nunique()}")
+    if dedup.get("cross_class_removed"):
+        print(f"dropped {len(dedup['cross_class_removed'])} files that appear under two wound types")
     print(f"active heads={active}" + (f"  (no labels, skipped: {skipped})" if skipped else ""))
 
     head_weights = {"wound_type": 1.0, **{h: cfg["heads"][h]["weight"] for h in HEAD_NAMES}}
@@ -131,7 +155,9 @@ def main(argv=None):
     loaders = {"train": mk("train", True), "val": mk("val", False), "test": mk("test", False)}
 
     mcfg = cfg["model"]
-    model = WoundTIMNet({h: len(vocabs[h]) for h in active}, mcfg["backbone"], mcfg["pretrained"], mcfg["dropout"]).to(device)
+    model = WoundTIMNet(
+        {h: len(vocabs[h]) for h in active}, mcfg["backbone"], mcfg["pretrained"], mcfg["dropout"], mcfg.get("weights_path")
+    ).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=tcfg["lr"], weight_decay=tcfg["weight_decay"])
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=tcfg["epochs"])
 
@@ -163,12 +189,29 @@ def main(argv=None):
             break
 
     model.load_state_dict(torch.load(out / "best.pt", map_location=device)["model"])
-    test = score(*predict(model, loaders["test"], device), vocabs)
-    result = {"best_epoch": best_epoch, "best_val_mean_macro_f1": best, "skipped_heads": skipped, "vocabs": vocabs, "test": test, "history": history}
+    preds, trues = predict(model, loaders["test"], device)
+    add_type_from_tim(preds, trues, vocabs)
+    test = score(preds, trues, vocabs)
+    test_df = df[df.split == "test"][["relpath", "patient_id"]].reset_index(drop=True)
+    for h in preds:
+        test_df[f"{h}_true"] = [vocabs[h][i] for i in trues[h]]
+        test_df[f"{h}_pred"] = [vocabs[h][i] if i >= 0 else "?" for i in preds[h]]
+    test_df.to_csv(out / "test_predictions.csv", index=False)
+    result = {
+        "best_epoch": best_epoch,
+        "best_val_mean_macro_f1": best,
+        "skipped_heads": skipped,
+        "split_sizes": df.split.value_counts().to_dict(),
+        "n_groups": int(df.patient_id.nunique()),
+        "dropped_cross_class_duplicates": dedup.get("cross_class_removed", []),
+        "vocabs": vocabs,
+        "test": test,
+        "history": history,
+    }
     (out / "metrics.json").write_text(json.dumps(result, indent=2))
     print("\nTEST")
     for h, r in test.items():
-        print(f"  {h:11s} n={r['n']:5d}  acc={r['accuracy']:.3f}  bal_acc={r['balanced_accuracy']:.3f}  macro_f1={r['macro_f1']:.3f}")
+        print(f"  {h:20s} n={r['n']:5d}  acc={r['accuracy']:.3f}  bal_acc={r['balanced_accuracy']:.3f}  macro_f1={r['macro_f1']:.3f}")
     return result
 
 
