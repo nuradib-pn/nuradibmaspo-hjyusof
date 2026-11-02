@@ -1,0 +1,45 @@
+# Baseline config: 8-class wound type + TIME-style T / I / M heads.
+#
+# Dataset layout (data_root):
+#   data_root/<wound_type>/<image>.jpg     one folder per wound type (required)
+#   labels_csv (optional)                  extra per-image labels, see README
+#
+# Any head whose labels are missing for an image is ignored for that image,
+# so the model trains even when T / I / M are only partly labelled (or absent).
+
+data_root: data/wounds
+labels_csv: null # e.g. data/wounds/labels.csv
+image_size: 224
+val_fraction: 0.15
+test_fraction: 0.15
+seed: 42
+
+# Label vocabularies. Wound types are discovered from folder names when
+# left empty. Edit T / I / M vocabularies to match how the data is annotated.
+wound_types: []
+heads:
+  tissue: # T: dominant tissue type in the wound bed
+    classes: [granulation, slough, necrotic, epithelial]
+    weight: 1.0
+  infection: # I: clinical signs of infection / inflammation
+    classes: [absent, present]
+    weight: 1.0
+  moisture: # M: exudate level
+    classes: [dry, low, moderate, high]
+    weight: 1.0
+
+model:
+  backbone: resnet50 # resnet18 | resnet50 | efficientnet_b0 | convnext_tiny
+  pretrained: true
+  dropout: 0.3
+
+train:
+  epochs: 30
+  batch_size: 32
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  freeze_backbone_epochs: 3 # warm up heads before fine-tuning everything
+  class_weighting: true # inverse-frequency weights for imbalance
+  num_workers: 4
+  early_stop_patience: 7
+  out_dir: runs/baseline

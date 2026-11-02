@@ -19,3 +19,9 @@ vendor
 # Python bytecode from bin/ helper scripts
 __pycache__/
 *.pyc
+
+# wound classifier: local data and training outputs
+wound_classifier/data/
+wound_classifier/runs/
+__pycache__/
+.pytest_cache/
