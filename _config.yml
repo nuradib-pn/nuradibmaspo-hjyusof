@@ -251,6 +251,7 @@ exclude:
   - gems/
   - migrations/
   - vendor
+  - wound_classifier/
 keep_files:
   - CNAME
   - .nojekyll

@@ -1,0 +1,48 @@
+# Baseline config: 8 TIME wound types + binary T / I / M heads.
+#
+# Dataset layout (data_root):
+#   data_root/TYPE 1.../<image>.jpg ... data_root/TYPE 8/<image>.jpg
+#   labels_csv (optional)  per-image labels that override / extend the folder labels, see README
+#
+# The clinical manual defines type = T + I + M, so with derive_tim_from_type the folder
+# name alone gives all four labels. Heads without labels for an image are ignored for it.
+
+data_root: data/wounds
+labels_csv: null # e.g. data/wounds/labels.csv
+derive_tim_from_type: true
+drop_duplicates: true # byte-identical files; copies filed under two types are dropped entirely
+group_by: capture_date # no patient IDs: same-day photos stay in one split
+image_size: 224
+val_fraction: 0.15
+test_fraction: 0.15
+seed: 42
+
+# Wound types are discovered from folder names when left empty.
+wound_types: []
+heads:
+  tissue: # T: necrotic tissue / slough
+    classes: [lt25, gt25] # <25% (score 0), >25% (score 4)
+    weight: 1.0
+  infection: # I: clinical signs of infection
+    classes: [absent, present] # score 0, score 2
+    weight: 1.0
+  moisture: # M: exudate
+    classes: [dry_minimal, moderate_wet] # score 1, score 2
+    weight: 1.0
+
+model:
+  backbone: resnet50 # resnet18 | resnet50 | efficientnet_b0 | convnext_tiny
+  pretrained: true # torchvision ImageNet weights (needs download.pytorch.org)
+  weights_path: null # or a local ImageNet state dict for the backbone (e.g. timm ResNet weights)
+  dropout: 0.3
+
+train:
+  epochs: 30
+  batch_size: 32
+  lr: 3.0e-4
+  weight_decay: 1.0e-4
+  freeze_backbone_epochs: 3 # warm up heads before fine-tuning everything
+  class_weighting: true # inverse-frequency weights for imbalance
+  num_workers: 4
+  early_stop_patience: 7
+  out_dir: runs/baseline
